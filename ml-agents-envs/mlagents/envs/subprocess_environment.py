@@ -1,6 +1,8 @@
 from typing import *
 import copy
 import numpy as np
+import cloudpickle
+import signal
 
 from mlagents.envs import UnityEnvironment
 from multiprocessing import Process, Pipe
@@ -26,18 +28,25 @@ class UnityEnvWorker(NamedTuple):
     conn: Connection
 
     def send(self, name: str, payload=None):
-        cmd = EnvironmentCommand(name, payload)
-        self.conn.send(cmd)
+        try:
+            cmd = EnvironmentCommand(name, payload)
+            self.conn.send(cmd)
+        except (BrokenPipeError, EOFError):
+            raise KeyboardInterrupt
 
     def recv(self) -> EnvironmentResponse:
-        response: EnvironmentResponse = self.conn.recv()
-        return response
+        try:
+            response: EnvironmentResponse = self.conn.recv()
+            return response
+        except (BrokenPipeError, EOFError):
+            raise KeyboardInterrupt
 
     def close(self):
         self.process.join()
 
 
 def worker(parent_conn: Connection, env_factory: Callable[[int], UnityEnvironment], worker_id: int):
+    env_factory = cloudpickle.loads(env_factory)
     env = env_factory(worker_id)
 
     def _send_response(cmd_name, payload):
@@ -61,7 +70,6 @@ def worker(parent_conn: Connection, env_factory: Callable[[int], UnityEnvironmen
             elif cmd.name == 'global_done':
                 _send_response('global_done', env.global_done)
             elif cmd.name == 'close':
-                env.close()
                 break
     except KeyboardInterrupt:
         print('UnityEnvironment worker: keyboard interrupt')
@@ -85,7 +93,7 @@ class SubprocessUnityEnvironment(BaseUnityEnvironment):
             env_factory: Callable[[int], BaseUnityEnvironment]
     ) -> UnityEnvWorker:
         parent_conn, child_conn = Pipe()
-        child_process = Process(target=worker, args=(child_conn, env_factory, worker_id))
+        child_process = Process(target=worker, args=(child_conn, cloudpickle.dumps(env_factory), worker_id), daemon=True)
         child_process.start()
         return UnityEnvWorker(child_process, worker_id, parent_conn)
 
